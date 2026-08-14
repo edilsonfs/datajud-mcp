@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Segundas às 6h UTC. O job "api-do-cnj" é o vigia: se o CNJ
+    # renomear um índice, o alerta chega aqui antes de chegar ao usuário.
+    - cron: "0 6 * * 1"
+
+jobs:
+  testes:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      - run: pytest -m "not rede" -q
+
+  api-do-cnj:
+    # Consulta a API real: detecta mudança de alias ou de contrato.
+    # Não bloqueia o merge, porque uma instabilidade do CNJ não é
+    # motivo para reprovar um pull request.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: pytest -m rede -q

@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "datajud-mcp"
+version = "1.0.0"
+description = "Servidor MCP da API Pública DataJud/CNJ — consulta processos judiciais brasileiros com Claude, ChatGPT ou Gemini"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Edilson Ferreira da Silva" }]
+keywords = [
+    "mcp", "model-context-protocol", "datajud", "cnj", "juridico",
+    "jurimetria", "direito", "processo-judicial", "brasil",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Legal Industry",
+    "License :: OSI Approved :: MIT License",
+    "Natural Language :: Portuguese (Brazilian)",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Office/Business",
+]
+dependencies = [
+    "mcp>=2.0",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+datajud-mcp = "datajud_mcp.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/edilsonfs/datajud-mcp"
+Documentacao = "https://github.com/edilsonfs/datajud-mcp#readme"
+Problemas = "https://github.com/edilsonfs/datajud-mcp/issues"
+"API DataJud" = "https://datajud-wiki.cnj.jus.br/api-publica/acesso"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/datajud_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "rede: teste que consulta a API real do CNJ (desative com -m 'not rede')",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
