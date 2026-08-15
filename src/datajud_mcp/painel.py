@@ -14,8 +14,8 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from .cliente import ClienteDataJud, ErroDataJud
-from .filtros import montar_agregacao, montar_contagem, montar_filtros
-from .resumo import extrair_buckets
+from .filtros import montar_agregacao, montar_busca, montar_contagem, montar_filtros
+from .resumo import extrair_buckets, resumir_resposta
 from .tribunais import TRIBUNAIS, obter
 
 
@@ -38,6 +38,8 @@ def coletar(
     ano: str = "",
     grau: str = "",
     codigo_orgao: int | None = None,
+    codigo_assunto: int | None = None,
+    codigo_classe: int | None = None,
 ) -> dict[str, Any]:
     """Reúne, em tempo real, o retrato de um recorte do acervo.
 
@@ -48,7 +50,12 @@ def coletar(
     if trib is None:
         raise ErroDataJud(f"Tribunal '{tribunal}' não reconhecido.")
 
-    comuns: dict[str, Any] = {"grau": grau or None, "codigo_orgao": codigo_orgao}
+    comuns: dict[str, Any] = {
+        "grau": grau or None,
+        "codigo_orgao": codigo_orgao,
+        "codigo_assunto": codigo_assunto,
+        "codigo_classe": codigo_classe,
+    }
     if ano:
         must = montar_filtros(
             data_inicio=f"{ano}-01-01", data_fim=f"{ano}-12-31", **comuns
@@ -95,6 +102,47 @@ def coletar(
             "primeiroAno": anos[0]["valor"] if anos else None,
         },
     }
+
+
+def listar_processos(
+    cliente: ClienteDataJud,
+    tribunal: str,
+    ano: str = "",
+    grau: str = "",
+    codigo_orgao: int | None = None,
+    codigo_assunto: int | None = None,
+    codigo_classe: int | None = None,
+    tamanho: int = 25,
+    search_after: list[Any] | None = None,
+) -> dict[str, Any]:
+    """Lista os processos de um recorte, um a um, com paginação.
+
+    É o que permite sair da estatística e olhar os autos que a
+    compõem — ver *quais* processos formam aquele assunto, e não apenas
+    quantos.
+    """
+    trib = obter(tribunal)
+    if trib is None:
+        raise ErroDataJud(f"Tribunal '{tribunal}' não reconhecido.")
+
+    must = montar_filtros(
+        grau=grau or None,
+        codigo_orgao=codigo_orgao,
+        codigo_assunto=codigo_assunto,
+        codigo_classe=codigo_classe,
+        **(
+            {"data_inicio": f"{ano}-01-01", "data_fim": f"{ano}-12-31"}
+            if ano
+            else {}
+        ),
+    )
+    resposta = cliente.consultar(
+        trib.sigla,
+        montar_busca(must, tamanho=tamanho, search_after=search_after),
+    )
+    resultado = resumir_resposta(resposta)
+    resultado["tribunal"] = trib.sigla
+    return resultado
 
 
 def lista_tribunais() -> list[dict[str, str]]:
@@ -193,8 +241,14 @@ button.limpar { border-color: var(--axis); color: var(--text-secondary); font-we
 .recorte { display: none; align-items: center; gap: 8px; font-size: 13px;
   color: var(--text-secondary); margin-bottom: 14px; flex-wrap: wrap; }
 .recorte.on { display: flex; }
-.chip { background: var(--surface-1); border: 1px solid var(--s1); color: var(--s1);
-  border-radius: 999px; padding: 3px 10px; font-weight: 600; }
+.chip { display: inline-block; background: var(--surface-1); border: 1px solid var(--s1);
+  color: var(--s1); border-radius: 999px; padding: 3px 10px; font-weight: 600;
+  cursor: pointer; margin: 2px 3px 2px 0; max-width: 380px; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; vertical-align: middle; }
+.chip:hover { background: var(--wash); }
+td.mono { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.sutil { color: var(--muted); font-size: 11.5px; }
+button.mais { margin-top: 12px; width: 100%; }
 
 .tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px,1fr)); gap: 12px; margin-bottom: 16px; }
 .tile { background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
@@ -278,9 +332,9 @@ footer a { color: var(--text-secondary); }
 </div>
 
 <div class="recorte" id="recorte">
-  <span>Recorte por unidade:</span>
-  <span class="chip" id="chip-unidade"></span>
-  <button class="limpar" id="b-limpar">remover</button>
+  <span>Recorte ativo:</span>
+  <span id="chips"></span>
+  <button class="limpar" id="b-limpar">limpar tudo</button>
 </div>
 
 <div id="conteudo"></div>
@@ -298,22 +352,36 @@ footer a { color: var(--text-secondary); }
 const $ = (s) => document.querySelector(s);
 const conteudo = $("#conteudo");
 const nf = new Intl.NumberFormat("pt-BR");
-let orgaoSel = null, nomeOrgaoSel = "";
+
+// Recorte ativo. Cada dimensao guarda codigo e nome: o codigo vai para
+// a consulta, o nome aparece no chip.
+const recorte = { orgao: null, assunto: null, classe: null };
+const ROTULO = { orgao: "Unidade", assunto: "Assunto", classe: "Classe" };
+let cursor = null, processosCarregados = [], totalProcessos = 0;
 
 const esc = (s) => String(s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const compacto = (n) => n >= 1e6 ? (n/1e6).toFixed(1).replace(".",",")+"M"
                      : n >= 1e3 ? Math.round(n/1e3)+"k" : String(n);
+const soData = (s) => {
+  if (!s) return "\\u2014";
+  const m = String(s).match(/^(\\d{4})-(\\d{2})-(\\d{2})/);
+  return m ? m[3] + "/" + m[2] + "/" + m[1] : String(s).slice(0, 10);
+};
 
-function barras(itens, corVar, clicavel) {
+function barras(itens, corVar, dimensao) {
   if (!itens.length) return '<p class="vazio">Sem resultados neste recorte.</p>';
   const max = Math.max.apply(null, itens.map(i => i.quantidade)) || 1;
   return '<div class="barras">' + itens.map(function (i) {
     const nome = i.nome || ("Codigo " + i.valor);
     const pct = Math.max(1, (i.quantidade / max) * 100);
-    const sel = (clicavel && String(i.valor) === String(orgaoSel)) ? " sel" : "";
-    const attr = clicavel ? ' data-codigo="' + i.valor + '" data-nome="' + esc(nome) + '"' : "";
-    return '<div class="linha' + (clicavel ? " clicavel" : "") + sel + '"' + attr +
-           ' title="' + esc(nome) + ' \\u2014 ' + nf.format(i.quantidade) + ' processos">' +
+    const ativo = dimensao && recorte[dimensao] &&
+                  String(recorte[dimensao].codigo) === String(i.valor);
+    const attr = dimensao
+      ? ' data-dim="' + dimensao + '" data-codigo="' + i.valor + '" data-nome="' + esc(nome) + '"'
+      : "";
+    return '<div class="linha' + (dimensao ? " clicavel" : "") + (ativo ? " sel" : "") + '"' + attr +
+           ' title="' + esc(nome) + ' \\u2014 ' + nf.format(i.quantidade) + ' processos' +
+           (dimensao ? ' (clique para recortar)' : '') + '">' +
            '<span class="rotulo">' + esc(nome) + '</span>' +
            '<span class="valor">' + nf.format(i.quantidade) + '</span>' +
            '<span class="trilho"><span class="preenche" style="width:' + pct + '%;background:var(' + corVar + ')"></span></span>' +
@@ -354,8 +422,9 @@ function tabela(unidades) {
 const tile = (rot, val, nota) =>
   '<div class="tile"><div class="rot">' + rot + '</div><div class="val">' + val +
   '</div><div class="nota" title="' + esc(nota) + '">' + esc(nota) + '</div></div>';
-const card = (t, cap, corpo) =>
-  '<section class="card"><h2>' + t + '</h2><p class="cap">' + cap + '</p>' + corpo + '</section>';
+const card = (t, cap, corpo, id) =>
+  '<section class="card"' + (id ? ' id="' + id + '"' : '') + '><h2>' + t + '</h2>' +
+  '<p class="cap">' + cap + '</p>' + corpo + '</section>';
 
 function render(d) {
   const topo = d.unidades[0];
@@ -368,44 +437,123 @@ function render(d) {
     '<div class="cards">' +
       card("Unidades judiciarias por acervo",
            "Clique em uma unidade para recortar todo o painel por ela.",
-           barras(d.unidades, "--s1", true) +
+           barras(d.unidades, "--s1", "orgao") +
            '<details><summary>Ver como tabela</summary>' + tabela(d.unidades) + '</details>') +
       '<div class="duplo">' +
-        card("Classes processuais", "As 10 mais frequentes no recorte.", barras(d.classes, "--s2", false)) +
-        card("Assuntos", "Os 10 mais frequentes no recorte.", barras(d.assuntos, "--s3", false)) +
+        card("Classes processuais", "Clique para recortar por classe.", barras(d.classes, "--s2", "classe")) +
+        card("Assuntos", "Clique para recortar por assunto.", barras(d.assuntos, "--s3", "assunto")) +
       '</div>' +
       card("Ajuizamentos por ano",
            "Serie completa do recorte \\u2014 nao e afetada pelo filtro de ano.",
            colunas(d.anos) + notaAnos(d.foraDaSerie)) +
+      card("Processos do recorte",
+           "Os autos que formam os numeros acima. Metadados publicos apenas.",
+           '<div id="lista-processos"><p class="vazio">Carregando processos\\u2026</p></div>',
+           "card-processos") +
     '</div>';
 
-  conteudo.querySelectorAll(".linha[data-codigo]").forEach(function (el) {
+  conteudo.querySelectorAll(".linha[data-dim]").forEach(function (el) {
     el.addEventListener("click", function () {
+      const dim = el.getAttribute("data-dim");
       const cod = el.getAttribute("data-codigo");
-      orgaoSel = (String(orgaoSel) === String(cod)) ? null : cod;
-      nomeOrgaoSel = el.getAttribute("data-nome") || "";
-      atualizarRecorte();
+      const jaAtivo = recorte[dim] && String(recorte[dim].codigo) === String(cod);
+      recorte[dim] = jaAtivo ? null : { codigo: cod, nome: el.getAttribute("data-nome") || "" };
+      atualizarChips();
+      consultar();
+    });
+  });
+
+  carregarProcessos(true);
+}
+
+function linhasProcessos(itens) {
+  return itens.map(function (p) {
+    const assuntos = (p.assuntos || []).map(a => a.nome).filter(Boolean).join("; ");
+    const mov = p.ultimoMovimento || {};
+    return '<tr>' +
+      '<td class="mono">' + esc(p.numeroProcesso || "\\u2014") + '</td>' +
+      '<td>' + esc((p.classe || {}).nome || "\\u2014") + '</td>' +
+      '<td>' + esc(assuntos || "\\u2014") + '</td>' +
+      '<td>' + esc((p.orgaoJulgador || {}).nome || "\\u2014") + '</td>' +
+      '<td class="num">' + soData(p.dataAjuizamento) + '</td>' +
+      '<td>' + esc(mov.nome || "\\u2014") + '<br><span class="sutil">' + soData(mov.dataHora) + '</span></td>' +
+      '</tr>';
+  }).join("");
+}
+
+function pintarProcessos(temMais) {
+  const alvo = $("#lista-processos");
+  if (!alvo) return;
+  if (!processosCarregados.length) {
+    alvo.innerHTML = '<p class="vazio">Nenhum processo encontrado neste recorte.</p>';
+    return;
+  }
+  alvo.innerHTML =
+    '<p class="cap">Exibindo <strong>' + nf.format(processosCarregados.length) +
+    '</strong> de ' + nf.format(totalProcessos) + ' processos.</p>' +
+    '<div class="rolagem"><table><thead><tr>' +
+    '<th>Numero</th><th>Classe</th><th>Assuntos</th><th>Unidade</th>' +
+    '<th class="num">Ajuizamento</th><th>Ultimo movimento</th>' +
+    '</tr></thead><tbody>' + linhasProcessos(processosCarregados) + '</tbody></table></div>' +
+    (temMais ? '<button id="b-mais" class="mais">Carregar mais 25</button>' : '');
+  const b = $("#b-mais");
+  if (b) b.addEventListener("click", function () { carregarProcessos(false); });
+}
+
+async function carregarProcessos(reiniciar) {
+  if (reiniciar) { cursor = null; processosCarregados = []; }
+  const alvo = $("#lista-processos");
+  const botao = alvo ? alvo.querySelector("#b-mais") : null;
+  if (botao) botao.textContent = "Carregando\\u2026";
+  const p = parametros();
+  if (cursor) p.set("cursor", JSON.stringify(cursor));
+  try {
+    const r = await fetch("/api/processos?" + p.toString());
+    const d = await r.json();
+    if (d.erro) { if (alvo) alvo.innerHTML = '<p class="aviso">' + esc(d.erro) + '</p>'; return; }
+    processosCarregados = processosCarregados.concat(d.processos || []);
+    totalProcessos = d.total || 0;
+    cursor = d.proximaPagina || null;
+    pintarProcessos(Boolean(cursor) && processosCarregados.length < totalProcessos);
+  } catch (e) {
+    if (alvo) alvo.innerHTML = '<p class="aviso">Nao foi possivel listar os processos.</p>';
+  }
+}
+
+function atualizarChips() {
+  const caixa = $("#recorte");
+  const ativos = Object.keys(recorte).filter(k => recorte[k]);
+  if (!ativos.length) { caixa.classList.remove("on"); return; }
+  caixa.classList.add("on");
+  $("#chips").innerHTML = ativos.map(k =>
+    '<span class="chip" data-dim="' + k + '" title="Remover este recorte">' +
+    ROTULO[k] + ": " + esc(recorte[k].nome) + ' \\u00d7</span>'
+  ).join(" ");
+  $("#chips").querySelectorAll(".chip").forEach(function (c) {
+    c.addEventListener("click", function () {
+      recorte[c.getAttribute("data-dim")] = null;
+      atualizarChips();
       consultar();
     });
   });
 }
 
-function atualizarRecorte() {
-  const r = $("#recorte");
-  if (orgaoSel) { r.classList.add("on"); $("#chip-unidade").textContent = nomeOrgaoSel; }
-  else r.classList.remove("on");
-}
-
-async function consultar() {
+function parametros() {
   const p = new URLSearchParams({
     tribunal: $("#f-trib").value,
     ano: $("#f-ano").value,
     grau: $("#f-grau").value
   });
-  if (orgaoSel) p.set("orgao", orgaoSel);
+  Object.keys(recorte).forEach(function (k) {
+    if (recorte[k]) p.set(k, recorte[k].codigo);
+  });
+  return p;
+}
+
+async function consultar() {
   conteudo.innerHTML = '<p class="carregando pulse">Consultando a base do CNJ\\u2026</p>';
   try {
-    const r = await fetch("/api/painel?" + p.toString());
+    const r = await fetch("/api/painel?" + parametros().toString());
     const d = await r.json();
     if (d.erro) { conteudo.innerHTML = '<p class="aviso">' + esc(d.erro) + '</p>'; return; }
     render(d);
@@ -414,10 +562,16 @@ async function consultar() {
   }
 }
 
+function limparTudo() {
+  Object.keys(recorte).forEach(k => recorte[k] = null);
+  atualizarChips();
+  consultar();
+}
+
 async function iniciar() {
   const anoAtual = new Date().getFullYear();
   const selAno = $("#f-ano");
-  for (let a = anoAtual; a >= anoAtual - 15; a--) {
+  for (let a = anoAtual; a >= 2000; a--) {
     selAno.insertAdjacentHTML("beforeend", '<option value="' + a + '">' + a + '</option>');
   }
   const tribs = await (await fetch("/api/tribunais")).json();
@@ -428,11 +582,11 @@ async function iniciar() {
     sel.insertAdjacentHTML("beforeend", '<option value="' + t.sigla + '">' + t.sigla + ' \\u2014 ' + esc(t.nome) + '</option>');
   });
   sel.value = "TJPE";
-  sel.addEventListener("change", function () { orgaoSel = null; atualizarRecorte(); consultar(); });
+  sel.addEventListener("change", limparTudo);
   $("#f-ano").addEventListener("change", consultar);
   $("#f-grau").addEventListener("change", consultar);
   $("#b-atualizar").addEventListener("click", consultar);
-  $("#b-limpar").addEventListener("click", function () { orgaoSel = null; atualizarRecorte(); consultar(); });
+  $("#b-limpar").addEventListener("click", limparTudo);
   consultar();
 }
 iniciar();

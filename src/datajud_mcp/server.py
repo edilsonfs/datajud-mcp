@@ -756,27 +756,66 @@ async def api_painel(request: Any) -> Any:
     from .painel import coletar
 
     p = request.query_params
-    codigo_orgao = p.get("orgao") or ""
     try:
-        orgao = int(codigo_orgao) if codigo_orgao else None
-    except ValueError:
-        return JSONResponse({"erro": "Código de órgão inválido."}, status_code=400)
+        recorte = _recorte(p)
+    except ValueError as e:
+        return JSONResponse({"erro": str(e)}, status_code=400)
 
     try:
         # coletar() é síncrono e faz I/O de rede; rodá-lo numa thread
         # evita bloquear o laço de eventos que atende o MCP.
+        dados = await anyio.to_thread.run_sync(lambda: coletar(_cliente, **recorte))
+    except (ErroDataJud, FiltroInvalido) as e:
+        return JSONResponse({"erro": str(e)}, status_code=502)
+    return JSONResponse(dados)
+
+
+@mcp.custom_route("/api/processos", methods=["GET"], include_in_schema=False)
+async def api_processos(request: Any) -> Any:
+    import anyio
+    from starlette.responses import JSONResponse
+
+    from .painel import listar_processos
+
+    p = request.query_params
+    try:
+        recorte = _recorte(p)
+        cursor = p.get("cursor") or ""
+        search_after = json.loads(cursor) if cursor else None
+    except ValueError as e:
+        return JSONResponse({"erro": str(e)}, status_code=400)
+    except json.JSONDecodeError:
+        return JSONResponse({"erro": "Cursor de paginação inválido."}, status_code=400)
+
+    try:
         dados = await anyio.to_thread.run_sync(
-            lambda: coletar(
-                _cliente,
-                p.get("tribunal") or "TJPE",
-                p.get("ano") or "",
-                p.get("grau") or "",
-                orgao,
-            )
+            lambda: listar_processos(_cliente, search_after=search_after, **recorte)
         )
     except (ErroDataJud, FiltroInvalido) as e:
         return JSONResponse({"erro": str(e)}, status_code=502)
     return JSONResponse(dados)
+
+
+def _recorte(p: Any) -> dict[str, Any]:
+    """Lê os filtros da query string, iguais nas duas rotas do painel."""
+
+    def inteiro(nome: str, rotulo: str) -> int | None:
+        bruto = p.get(nome) or ""
+        if not bruto:
+            return None
+        try:
+            return int(bruto)
+        except ValueError:
+            raise ValueError(f"{rotulo} inválido: '{bruto}'.") from None
+
+    return {
+        "tribunal": p.get("tribunal") or "TJPE",
+        "ano": p.get("ano") or "",
+        "grau": p.get("grau") or "",
+        "codigo_orgao": inteiro("orgao", "Código de órgão"),
+        "codigo_assunto": inteiro("assunto", "Código de assunto"),
+        "codigo_classe": inteiro("classe", "Código de classe"),
+    }
 
 
 def main() -> None:
