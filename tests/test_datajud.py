@@ -125,10 +125,40 @@ def test_data_fora_do_formato_iso_e_recusada():
         filtros.montar_filtros(data_inicio="31/01/2024")
 
 
-def test_intervalo_de_datas_vira_range():
+def test_intervalo_cobre_as_duas_formas_da_base():
+    # Regressão: parte dos tribunais grava dataAjuizamento como o número
+    # yyyyMMddHHmmss, que o Elasticsearch lê como epoch em milissegundos
+    # — um processo de 2019 cai no ano 2610. Um filtro só em ISO perdia
+    # esses registros, e em alguns tribunais isso é o acervo inteiro.
     must = filtros.montar_filtros(data_inicio="2024-01-01", data_fim="2024-12-31")
-    assert must == [
-        {"range": {"dataAjuizamento": {"gte": "2024-01-01", "lte": "2024-12-31"}}}
+    assert len(must) == 1
+    should = must[0]["bool"]["should"]
+    assert {
+        "range": {"dataAjuizamento": {"gte": "2024-01-01", "lte": "2024-12-31"}}
+    } in should
+    assert {
+        "range": {"dataAjuizamento": {"gte": 20240101000000, "lte": 20241231235959}}
+    } in should
+    assert must[0]["bool"]["minimum_should_match"] == 1
+
+
+def test_agregacao_por_ano_usa_buckets_explicitos():
+    # date_histogram devolveria "2610" para processos de 2019.
+    corpo = filtros.montar_agregacao("ano", [], tamanho=5)
+    chaves = corpo["aggs"]["grupos"]["filters"]["filters"]
+    assert all(k.isdigit() and len(k) == 4 for k in chaves)
+    assert all("bool" in v for v in chaves.values())
+
+
+def test_buckets_nomeados_da_agregacao_por_ano():
+    resposta = {
+        "aggregations": {
+            "grupos": {"buckets": {"2023": {"doc_count": 7}, "2024": {"doc_count": 9}}}
+        }
+    }
+    assert resumo.extrair_buckets(resposta, "ano") == [
+        {"valor": "2023", "quantidade": 7},
+        {"valor": "2024", "quantidade": 9},
     ]
 
 

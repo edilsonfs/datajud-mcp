@@ -8,14 +8,28 @@ correções precisavam ser aplicadas cinco vezes.
 from __future__ import annotations
 
 import re
+from datetime import date
 from typing import Any
+
+# Primeiro ano da série histórica oferecida pelas agregações por ano.
+ANO_INICIAL_PADRAO = 2000
+
+
+def _anos_da_serie(quantidade: int) -> list[int]:
+    """Anos cobertos por uma agregação por ano, do mais antigo ao atual."""
+    ano_final = date.today().year
+    quantidade = max(1, min(60, quantidade))
+    ano_inicial = max(ANO_INICIAL_PADRAO, ano_final - quantidade + 1)
+    return list(range(ano_inicial, ano_final + 1))
 
 # Agrupamentos aceitos por ``montar_agregacao``: nome amigável -> campo.
 CAMPOS_AGRUPAVEIS: dict[str, str] = {
     "classe": "classe.codigo",
     "assunto": "assuntos.codigo",
     "orgao": "orgaoJulgador.codigo",
-    "grau": "grau",
+    # grau é indexado como texto analisado; só o subcampo keyword aceita
+    # agregação.
+    "grau": "grau.keyword",
     "formato": "formato.codigo",
     "sistema": "sistema.codigo",
     "ano": "dataAjuizamento",
@@ -78,19 +92,52 @@ def montar_filtros(
             {"term": {"orgaoJulgador.codigoMunicipioIBGE": codigo_municipio_ibge}}
         )
     if grau:
-        must.append({"term": {"grau": grau.upper().strip()}})
+        # match, e não term: grau é campo de texto analisado, então o
+        # termo exato "G1" não casaria com o índice em minúsculas.
+        must.append({"match": {"grau": grau.upper().strip()}})
 
     inicio = _validar_data("data_inicio", data_inicio)
     fim = _validar_data("data_fim", data_fim)
     if inicio or fim:
-        intervalo: dict[str, str] = {}
-        if inicio:
-            intervalo["gte"] = inicio
-        if fim:
-            intervalo["lte"] = fim
-        must.append({"range": {"dataAjuizamento": intervalo}})
+        must.append(intervalo_de_ajuizamento(inicio, fim))
 
     return must
+
+
+def intervalo_de_ajuizamento(
+    inicio: str | None,
+    fim: str | None,
+) -> dict[str, Any]:
+    """Filtra por data de ajuizamento cobrindo as duas formas da base.
+
+    ``dataAjuizamento`` é um campo de data, mas boa parte dos tribunais
+    grava nele o número ``yyyyMMddHHmmss`` (ex.: ``20191113191041``).
+    O Elasticsearch lê esse número como epoch em milissegundos, e o
+    processo de 2019 vai parar no ano 2610. Um filtro escrito só na
+    forma ISO perde silenciosamente todos esses registros — em alguns
+    tribunais, o acervo inteiro.
+
+    A saída casa qualquer uma das duas representações.
+    """
+    iso: dict[str, str] = {}
+    numerico: dict[str, int] = {}
+
+    if inicio:
+        iso["gte"] = inicio
+        numerico["gte"] = int(inicio.replace("-", "") + "000000")
+    if fim:
+        iso["lte"] = fim
+        numerico["lte"] = int(fim.replace("-", "") + "235959")
+
+    return {
+        "bool": {
+            "should": [
+                {"range": {"dataAjuizamento": iso}},
+                {"range": {"dataAjuizamento": numerico}},
+            ],
+            "minimum_should_match": 1,
+        }
+    }
 
 
 def montar_query(must: list[dict[str, Any]]) -> dict[str, Any]:
@@ -146,13 +193,18 @@ def montar_agregacao(
         )
 
     if agrupar_por == "ano":
+        # Um date_histogram devolveria "2610" para processos de 2019 —
+        # ver intervalo_de_ajuizamento. Um bucket explícito por ano, com
+        # as duas representações, é o que dá uma série confiável.
         agregacao: dict[str, Any] = {
             "grupos": {
-                "date_histogram": {
-                    "field": "dataAjuizamento",
-                    "calendar_interval": "year",
-                    "format": "yyyy",
-                    "min_doc_count": 1,
+                "filters": {
+                    "filters": {
+                        str(ano): intervalo_de_ajuizamento(
+                            f"{ano}-01-01", f"{ano}-12-31"
+                        )
+                        for ano in _anos_da_serie(tamanho)
+                    }
                 }
             }
         }

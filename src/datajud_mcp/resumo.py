@@ -156,6 +156,14 @@ def extrair_buckets(
     grupos = (resposta.get("aggregations", {}) or {}).get("grupos", {}) or {}
     buckets = grupos.get("buckets", []) or []
 
+    # A agregação por ano usa "filters" com chaves nomeadas, que devolve
+    # um objeto {ano: {doc_count}} em vez de uma lista de buckets.
+    if isinstance(buckets, dict):
+        return [
+            {"valor": chave, "quantidade": (dados or {}).get("doc_count", 0)}
+            for chave, dados in sorted(buckets.items())
+        ]
+
     resultado: list[dict[str, Any]] = []
     for b in buckets:
         chave = b.get("key_as_string", b.get("key"))

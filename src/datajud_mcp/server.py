@@ -724,6 +724,61 @@ async def health(_request: Any) -> Any:
     })
 
 
+# --- Painel web -----------------------------------------------------
+# O mesmo servidor que atende o protocolo MCP serve um painel para
+# quem prefere olhar antes de perguntar. As consultas rodam aqui no
+# servidor, então a página não esbarra em CORS nem expõe a API do CNJ
+# ao navegador do visitante.
+
+@mcp.custom_route("/", methods=["GET"], include_in_schema=False)
+async def pagina_painel(_request: Any) -> Any:
+    from starlette.responses import HTMLResponse
+
+    from .painel import PAGINA
+
+    return HTMLResponse(PAGINA)
+
+
+@mcp.custom_route("/api/tribunais", methods=["GET"], include_in_schema=False)
+async def api_tribunais(_request: Any) -> Any:
+    from starlette.responses import JSONResponse
+
+    from .painel import lista_tribunais
+
+    return JSONResponse(lista_tribunais())
+
+
+@mcp.custom_route("/api/painel", methods=["GET"], include_in_schema=False)
+async def api_painel(request: Any) -> Any:
+    import anyio
+    from starlette.responses import JSONResponse
+
+    from .painel import coletar
+
+    p = request.query_params
+    codigo_orgao = p.get("orgao") or ""
+    try:
+        orgao = int(codigo_orgao) if codigo_orgao else None
+    except ValueError:
+        return JSONResponse({"erro": "Código de órgão inválido."}, status_code=400)
+
+    try:
+        # coletar() é síncrono e faz I/O de rede; rodá-lo numa thread
+        # evita bloquear o laço de eventos que atende o MCP.
+        dados = await anyio.to_thread.run_sync(
+            lambda: coletar(
+                _cliente,
+                p.get("tribunal") or "TJPE",
+                p.get("ano") or "",
+                p.get("grau") or "",
+                orgao,
+            )
+        )
+    except (ErroDataJud, FiltroInvalido) as e:
+        return JSONResponse({"erro": str(e)}, status_code=502)
+    return JSONResponse(dados)
+
+
 def main() -> None:
     """Ponto de entrada do console script ``datajud-mcp``."""
     mcp.run()
