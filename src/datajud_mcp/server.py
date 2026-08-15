@@ -32,8 +32,8 @@ from .resumo import (
     resumir_processo,
     resumir_resposta,
 )
+from .tribunais import TRIBUNAIS, obter
 from .tribunais import buscar as buscar_tribunais
-from .tribunais import obter
 
 AVISO_COBERTURA = (
     "A API DataJud publica apenas metadados processuais. Não há nomes de "
@@ -705,6 +705,23 @@ def comparar_tribunais(assunto: str, tribunais: str) -> str:
         "portes e práticas de cadastro diferentes, o que limita a "
         "comparação direta."
     )
+
+
+# --- Rota de saúde -------------------------------------------------
+# Usada pelo HEALTHCHECK do contêiner e pelo balanceador quando o
+# servidor roda hospedado. Fica fora do protocolo MCP e não exige
+# autorização — por isso não revela nada além do próprio estado.
+
+@mcp.custom_route("/health", methods=["GET"], include_in_schema=False)
+async def health(_request: Any) -> Any:
+    from starlette.responses import JSONResponse
+
+    return JSONResponse({
+        "status": "ok",
+        "servico": "datajud-mcp",
+        "versao": __version__,
+        "tribunais": len(TRIBUNAIS),
+    })
 
 
 def main() -> None:
