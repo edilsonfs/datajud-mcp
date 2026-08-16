@@ -12,6 +12,54 @@ import argparse
 from . import __version__
 
 
+# Cabeçalhos de segurança exigidos pelo OWASP ZAP (CSP, anti-clickjacking,
+# HSTS, nosniff). O painel (painel.py) é autocontido, com <script>/<style>
+# inline e sem CDN — por isso script-src/style-src toleram 'unsafe-inline';
+# todo o resto fica preso a 'self'. Aplicados via wrapper ASGI para cobrir
+# tanto o painel quanto as rotas /api e o próprio protocolo MCP.
+_CSP = (
+    "default-src 'self'; "
+    "script-src 'self' 'unsafe-inline'; "
+    "style-src 'self' 'unsafe-inline'; "
+    "img-src 'self' data:; "
+    "connect-src 'self'; "
+    "font-src 'self'; "
+    "frame-ancestors 'none'; "
+    "base-uri 'self'; "
+    "form-action 'self'; "
+    "object-src 'none'"
+)
+_HEADERS_SEGURANCA = [
+    (b"content-security-policy", _CSP.encode()),
+    (b"x-frame-options", b"DENY"),
+    (b"x-content-type-options", b"nosniff"),
+    (b"referrer-policy", b"no-referrer"),
+    (b"strict-transport-security", b"max-age=31536000; includeSubDomains"),
+]
+
+
+def _com_headers_seguranca(app):
+    """Envolve um app ASGI acrescentando os cabeçalhos de segurança às respostas HTTP."""
+
+    async def wrapper(scope, receive, send):
+        if scope["type"] != "http":
+            await app(scope, receive, send)
+            return
+
+        async def send_com_headers(message):
+            if message["type"] == "http.response.start":
+                headers = message.setdefault("headers", [])
+                presentes = {k.lower() for k, _ in headers}
+                for chave, valor in _HEADERS_SEGURANCA:
+                    if chave not in presentes:
+                        headers.append((chave, valor))
+            await send(message)
+
+        await app(scope, receive, send_com_headers)
+
+    return wrapper
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="datajud-mcp",
@@ -36,7 +84,10 @@ def main() -> None:
     from .server import mcp
 
     if args.transport == "http":
-        mcp.run(transport="streamable-http", host=args.host, port=args.port)
+        import uvicorn
+
+        app = _com_headers_seguranca(mcp.streamable_http_app())
+        uvicorn.run(app, host=args.host, port=args.port)
     else:
         mcp.run()
 
